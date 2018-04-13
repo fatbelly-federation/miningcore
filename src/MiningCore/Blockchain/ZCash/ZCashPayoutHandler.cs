@@ -91,7 +91,7 @@ namespace MiningCore.Blockchain.ZCash
 
             // detect z_shieldcoinbase support
             var response = await daemon.ExecuteCmdSingleAsync<JObject>(ZCashCommands.ZShieldCoinbase);
-            supportsNativeShielding = response.Error.Code != BitcoinConstants.ErrorMethodNotFound;
+            supportsNativeShielding = response.Error.Code != (int) BitcoinRPCErrorCode.RPC_METHOD_NOT_FOUND;
         }
 
         public override async Task PayoutAsync(Balance[] balances)
@@ -104,12 +104,16 @@ namespace MiningCore.Blockchain.ZCash
             else
                 await ShieldCoinbaseEmulatedAsync();
 
+            var didUnlockWallet = false;
+
             // send in batches with no more than 50 recipients to avoid running into tx size limits
             var pageSize = 50;
             var pageCount = (int)Math.Ceiling(balances.Length / (double)pageSize);
 
             for (var i = 0; i < pageCount; i++)
             {
+                didUnlockWallet = false;
+
                 // get a page full of balances
                 var page = balances
                     .Skip(i * pageSize)
@@ -151,6 +155,7 @@ namespace MiningCore.Blockchain.ZCash
                 };
 
                 // send command
+                tryTransfer:
                 var result = await daemon.ExecuteCmdSingleAsync<string>(ZCashCommands.ZSendMany, args);
 
                 if (result.Error == null)
@@ -212,11 +217,52 @@ namespace MiningCore.Blockchain.ZCash
 
                 else
                 {
-                    logger.Error(() => $"[{LogCategory}] {ZCashCommands.ZSendMany} returned error: {result.Error.Message} code {result.Error.Code}");
+                    if (result.Error.Code == (int)BitcoinRPCErrorCode.RPC_WALLET_UNLOCK_NEEDED && !didUnlockWallet)
+                    {
+                        if (!string.IsNullOrEmpty(extraPoolPaymentProcessingConfig?.WalletPassword))
+                        {
+                            logger.Info(() => $"[{LogCategory}] Unlocking wallet");
 
-                    NotifyPayoutFailure(poolConfig.Id, page, $"{ZCashCommands.ZSendMany} returned error: {result.Error.Message} code {result.Error.Code}", null);
+                            var unlockResult = await daemon.ExecuteCmdSingleAsync<JToken>(BitcoinCommands.WalletPassphrase, new[]
+                            {
+                                (object) extraPoolPaymentProcessingConfig.WalletPassword,
+                                (object) 5 // unlock for N seconds
+                            });
+
+                            if (unlockResult.Error == null)
+                            {
+                                didUnlockWallet = true;
+                                goto tryTransfer;
+                            }
+
+                            else
+                            {
+                                logger.Error(() => $"[{LogCategory}] {BitcoinCommands.WalletPassphrase} returned error: {result.Error.Message} code {result.Error.Code}");
+                                NotifyPayoutFailure(poolConfig.Id, page, $"{BitcoinCommands.WalletPassphrase} returned error: {result.Error.Message} code {result.Error.Code}", null);
+                                break;
+                            }
+                        }
+
+                        else
+                        {
+                            logger.Error(() => $"[{LogCategory}] Wallet is locked but walletPassword was not configured. Unable to send funds.");
+                            NotifyPayoutFailure(poolConfig.Id, page, $"Wallet is locked but walletPassword was not configured. Unable to send funds.", null);
+                            break;
+                        }
+                    }
+
+                    else
+                    {
+                        logger.Error(() => $"[{LogCategory}] {ZCashCommands.ZSendMany} returned error: {result.Error.Message} code {result.Error.Code}");
+
+                        NotifyPayoutFailure(poolConfig.Id, page, $"{ZCashCommands.ZSendMany} returned error: {result.Error.Message} code {result.Error.Code}", null);
+                    }
                 }
             }
+
+            // lock wallet
+            logger.Info(() => $"[{LogCategory}] Locking wallet");
+            await daemon.ExecuteCmdSingleAsync<JToken>(BitcoinCommands.WalletLock);
         }
 
         #endregion // IPayoutHandler
@@ -236,15 +282,19 @@ namespace MiningCore.Blockchain.ZCash
                 poolExtraConfig.ZAddress,   // dest:   pool's z-addr
             };
 
-            var result = await daemon.ExecuteCmdSingleAsync<string>(ZCashCommands.ZShieldCoinbase, args);
+            var result = await daemon.ExecuteCmdSingleAsync<ZCashShieldingResponse>(ZCashCommands.ZShieldCoinbase, args);
 
             if (result.Error != null)
             {
-                logger.Error(() => $"[{LogCategory}] {ZCashCommands.ZShieldCoinbase} returned error: {result.Error.Message} code {result.Error.Code}");
+                if(result.Error.Code == -6)
+                    logger.Info(() => $"[{LogCategory}] No funds to shield");
+                else
+                    logger.Error(() => $"[{LogCategory}] {ZCashCommands.ZShieldCoinbase} returned error: {result.Error.Message} code {result.Error.Code}");
+
                 return;
             }
 
-            var operationId = result.Response;
+            var operationId = result.Response.OperationId;
 
             logger.Info(() => $"[{LogCategory}] {ZCashCommands.ZShieldCoinbase} operation id: {operationId}");
 
@@ -283,7 +333,7 @@ namespace MiningCore.Blockchain.ZCash
                     }
                 }
 
-                logger.Info(() => $"[{LogCategory}] Waiting for operation completion: {operationId}");
+                logger.Info(() => $"[{LogCategory}] Waiting for shielding operation completion: {operationId}");
                 await Task.Delay(TimeSpan.FromSeconds(10));
             }
         }
@@ -381,7 +431,7 @@ namespace MiningCore.Blockchain.ZCash
                     }
                 }
 
-                logger.Info(() => $"[{LogCategory}] Waiting for transfer completion: {operationId}");
+                logger.Info(() => $"[{LogCategory}] Waiting for shielding transfer completion: {operationId}");
                 await Task.Delay(TimeSpan.FromSeconds(10));
             }
         }

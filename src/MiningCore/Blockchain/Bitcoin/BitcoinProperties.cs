@@ -108,6 +108,8 @@ namespace MiningCore.Blockchain.Bitcoin
             { CoinType.DOGE, scryptCoin },
             { CoinType.VIA, scryptCoin },
             { CoinType.MOON, scryptCoin },
+            { CoinType.FLO, scryptCoin },
+            { CoinType.PAK, scryptCoin },
 
             // Groestl
             { CoinType.GRS, groestlCoin },
@@ -121,6 +123,7 @@ namespace MiningCore.Blockchain.Bitcoin
 
             // X11
             { CoinType.DASH, x11Coin },
+            { CoinType.CANN, x11Coin },
 
             // Equihash
             { CoinType.ZEC, equihashCoin },

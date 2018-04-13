@@ -20,14 +20,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
-using System.Text;
-using System.Threading;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Autofac;
 using AutoMapper;
@@ -37,16 +36,12 @@ using MiningCore.Configuration;
 using MiningCore.Extensions;
 using MiningCore.Notifications;
 using MiningCore.Persistence;
-using MiningCore.Persistence.Model;
 using MiningCore.Persistence.Repositories;
 using MiningCore.Stratum;
 using MiningCore.Time;
 using MiningCore.Util;
 using MiningCore.VarDiff;
-using NetMQ;
-using NetMQ.Sockets;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
 using NLog;
 using Contract = MiningCore.Contracts.Contract;
 
@@ -92,6 +87,8 @@ namespace MiningCore.Mining
         protected const int VarDiffSampleCount = 32;
         protected static readonly TimeSpan maxShareAge = TimeSpan.FromSeconds(6);
         protected readonly Subject<ClientShare> shareSubject = new Subject<ClientShare>();
+        protected static readonly Regex regexStaticDiff = new Regex(@"d=(\d*(\.\d+)?)", RegexOptions.Compiled);
+        protected const string PasswordControlVarsSeparator = ";";
 
         protected readonly Dictionary<PoolEndpoint, VarDiffManager> varDiffManagers =
             new Dictionary<PoolEndpoint, VarDiffManager>();
@@ -100,6 +97,26 @@ namespace MiningCore.Mining
 
         protected abstract Task SetupJobManager();
         protected abstract WorkerContextBase CreateClientContext();
+
+        protected double? GetStaticDiffFromPassparts(string[] parts)
+        {
+            if (parts == null || parts.Length == 0)
+                return null;
+
+            foreach(var part in parts)
+            {
+                var m = regexStaticDiff.Match(part);
+
+                if (m.Success)
+                {
+                    var str = m.Groups[1].Value.Trim();
+                    if (double.TryParse(str, NumberStyles.Float, CultureInfo.InvariantCulture, out var diff))
+                        return diff;
+                }
+            }
+
+            return null;
+        }
 
         protected override void OnConnect(StratumClient client)
         {
